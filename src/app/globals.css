@@ -1,0 +1,134 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f6f0e7;
+  --foreground: #211c17;
+  --paper: #f6f0e7;
+  --ink: #211c17;
+  --muted-ink: #6c645d;
+  --line: #ddd1c2;
+  --accent: #d7b36d;
+  --accent-ink: #8b6320;
+  --alert: #f0d8c5;
+  --alert-ink: #9a4d22;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: "Iowan Old Style", "Palatino Linotype", "URW Palladio L", Georgia, serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", "SF Mono", Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--paper);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  cursor: pointer;
+}
+
+.hero-panel {
+  border-radius: 2rem;
+  background:
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.58)),
+    linear-gradient(135deg, #efe3d0, #f3e9dc 55%, #f8f3ec);
+  border: 1px solid rgba(123, 97, 60, 0.08);
+  padding: 1.5rem;
+}
+
+.action-panel {
+  border-radius: 2rem;
+  background: linear-gradient(180deg, var(--alert), #f5e8da);
+  border: 1px solid rgba(154, 77, 34, 0.1);
+  padding: 1.5rem;
+}
+
+.soft-card {
+  border-radius: 1.6rem;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  padding: 1.2rem;
+}
+
+.section-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted-ink);
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.86);
+  padding: 0.45rem 0.85rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-ink);
+}
+
+.status-chip-alert {
+  border-color: rgba(154, 77, 34, 0.18);
+  background: rgba(255, 255, 255, 0.75);
+  color: var(--alert-ink);
+}
+
+.primary-button,
+.secondary-button {
+  min-height: 44px;
+  flex: 1;
+  border-radius: 999px;
+  padding: 0.95rem 1.2rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.primary-button {
+  background: var(--ink);
+  color: #fff8ef;
+}
+
+.secondary-button {
+  border: 1px solid rgba(33, 28, 23, 0.12);
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--ink);
+}
+
+.bottom-nav {
+  backdrop-filter: blur(10px);
+}
+
+.nav-item {
+  min-height: 44px;
+  border-radius: 999px;
+  padding: 0.7rem 0.95rem;
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--muted-ink);
+}
+
+.nav-item-active {
+  background: rgba(33, 28, 23, 0.92);
+  color: #fff8ef;
+}
