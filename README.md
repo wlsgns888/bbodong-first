@@ -1,36 +1,69 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Bbodong
 
-## Getting Started
+Bbodong is a shared weekly buffer prototype for newly married dual-income couples.
 
-First, run the development server:
+## Current Product Surface
+
+- `Home`: weekly buffer summary and the one thing to discuss
+- `Timeline`: filterable shared events
+- `Check-in`: a three-step weekly ritual
+- `Rules`: lightweight guardrails that can be toggled on and off
+
+## Stack
+
+- `next@16.2.1`
+- `react@19`
+- `tailwindcss@4`
+- `@supabase/supabase-js`
+- `vitest` + React Testing Library
+
+## Project Structure
+
+- `src/app/page.tsx`: server route entry
+- `src/components/home-client.tsx`: interactive UI state and rendering
+- `src/lib/env.ts`: public env checks for the UI
+- `src/lib/supabase/client.ts`: optional Supabase client bootstrap
+- `supabase/schema.sql`: starter schema for moving state from local storage into Supabase
+
+## Environment
+
+If Supabase env vars are missing, the UI still renders and shows a disconnected badge instead of crashing.
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+```
+
+## Commands
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run lint
+npm run test
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000` after starting the dev server.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Testing
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The current component tests cover:
 
-## Learn More
+- timeline category filtering
+- full check-in completion and reset
+- rules toggle count updates
+- locale switching and document language updates
+- local state restore and reset behavior
+- Supabase missing-table fallback state
+- public env fallback and Supabase client bootstrap
 
-To learn more about Next.js, take a look at the following resources:
+Test files:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `src/components/home-client.test.tsx`
+- `src/lib/env.test.ts`
+- `src/lib/supabase/client.test.ts`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Supabase Next Step
 
-## Deploy on Vercel
+The current app persists live UI state in browser storage so the prototype already keeps user changes between reloads.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+To move that state into Supabase, apply `supabase/schema.sql` in the Supabase SQL editor first. The current project does not yet have a public table available, which is why the app is not writing remote state today.

@@ -11,6 +11,7 @@
   --accent-ink: #8b6320;
   --alert: #f0d8c5;
   --alert-ink: #9a4d22;
+  --panel-shadow: 0 18px 45px rgba(64, 38, 8, 0.08);
 }
 
 @theme inline {
@@ -25,7 +26,9 @@
 }
 
 html {
-  background: var(--paper);
+  background:
+    radial-gradient(circle at top center, rgba(255, 255, 255, 0.65), transparent 36%),
+    linear-gradient(180deg, #f9f3eb 0%, #f1e7d8 52%, #efe4d4 100%);
 }
 
 body {
@@ -50,6 +53,7 @@ button {
     linear-gradient(135deg, #efe3d0, #f3e9dc 55%, #f8f3ec);
   border: 1px solid rgba(123, 97, 60, 0.08);
   padding: 1.5rem;
+  box-shadow: var(--panel-shadow);
 }
 
 .action-panel {
@@ -57,6 +61,7 @@ button {
   background: linear-gradient(180deg, var(--alert), #f5e8da);
   border: 1px solid rgba(154, 77, 34, 0.1);
   padding: 1.5rem;
+  box-shadow: var(--panel-shadow);
 }
 
 .soft-card {
@@ -64,6 +69,8 @@ button {
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.72);
   padding: 1.2rem;
+  box-shadow: var(--panel-shadow);
+  backdrop-filter: blur(14px);
 }
 
 .section-label {
@@ -102,6 +109,10 @@ button {
   padding: 0.95rem 1.2rem;
   font-size: 0.95rem;
   font-weight: 700;
+  transition:
+    transform 180ms ease,
+    opacity 180ms ease,
+    background-color 180ms ease;
 }
 
 .primary-button {
@@ -113,6 +124,15 @@ button {
   border: 1px solid rgba(33, 28, 23, 0.12);
   background: rgba(255, 255, 255, 0.88);
   color: var(--ink);
+}
+
+.primary-button:hover,
+.secondary-button:hover,
+.nav-item:hover,
+.filter-pill:hover,
+.choice-card:hover,
+.tab-card:hover {
+  transform: translateY(-1px);
 }
 
 .bottom-nav {
@@ -131,4 +151,132 @@ button {
 .nav-item-active {
   background: rgba(33, 28, 23, 0.92);
   color: #fff8ef;
+}
+
+.page-shell {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 10% 10%, rgba(255, 255, 255, 0.6), transparent 22%),
+    radial-gradient(circle at 90% 0%, rgba(215, 179, 109, 0.22), transparent 20%);
+}
+
+.mini-panel {
+  border-radius: 1.3rem;
+  border: 1px solid rgba(33, 28, 23, 0.08);
+  background: rgba(255, 255, 255, 0.78);
+  padding: 1rem;
+}
+
+.tab-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-radius: 1.3rem;
+  border: 1px solid rgba(33, 28, 23, 0.08);
+  background: rgba(255, 255, 255, 0.74);
+  padding: 1rem;
+  text-align: left;
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    background-color 180ms ease;
+}
+
+.tab-card-active {
+  border-color: rgba(139, 99, 32, 0.28);
+  background: rgba(248, 240, 227, 0.92);
+}
+
+.timeline-card {
+  border-radius: 1.25rem;
+  border: 1px solid var(--line);
+  background: white;
+  padding: 1rem;
+}
+
+.filter-pill {
+  min-height: 40px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.78);
+  padding: 0.55rem 0.95rem;
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--muted-ink);
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    background-color 180ms ease,
+    color 180ms ease;
+}
+
+.filter-pill-active {
+  border-color: rgba(33, 28, 23, 0.18);
+  background: rgba(33, 28, 23, 0.92);
+  color: #fff8ef;
+}
+
+.choice-card {
+  width: 100%;
+  border-radius: 1.25rem;
+  border: 1px solid rgba(33, 28, 23, 0.08);
+  background: rgba(255, 255, 255, 0.82);
+  padding: 1rem;
+  text-align: left;
+  font-size: 0.95rem;
+  font-weight: 700;
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    background-color 180ms ease;
+}
+
+.choice-card:hover {
+  border-color: rgba(139, 99, 32, 0.28);
+  background: rgba(248, 240, 227, 0.92);
+}
+
+.rule-card {
+  border-radius: 1.3rem;
+  border: 1px solid rgba(33, 28, 23, 0.08);
+  background: rgba(255, 255, 255, 0.82);
+  padding: 1rem;
+}
+
+.toggle-button {
+  position: relative;
+  display: inline-flex;
+  height: 2rem;
+  width: 3.5rem;
+  flex: none;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(33, 28, 23, 0.08);
+  background: rgba(33, 28, 23, 0.12);
+  padding: 0.2rem;
+  transition: background-color 180ms ease;
+}
+
+.toggle-button-on {
+  background: rgba(33, 28, 23, 0.9);
+}
+
+.toggle-thumb {
+  display: block;
+  height: 1.4rem;
+  width: 1.4rem;
+  border-radius: 999px;
+  background: #fff8ef;
+  transition: transform 180ms ease;
+}
+
+.toggle-button-on .toggle-thumb {
+  transform: translateX(1.4rem);
+}
+
+@media (max-width: 640px) {
+  .bottom-nav {
+    max-width: 100%;
+  }
 }
