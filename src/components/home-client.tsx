@@ -1,44 +1,43 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 
 type Locale = "ko" | "en";
-type TabId = "home" | "timeline" | "checkin" | "rules";
-type FilterId = "all" | "alerts" | "rituals" | "notes";
+type ViewId = "home" | "checkin" | "rules";
 
 type LocalizedText = Record<Locale, string>;
 
-type TimelineItem = {
-  title: LocalizedText;
-  amount: LocalizedText;
-  impact: LocalizedText;
-  state: LocalizedText;
-  category: Exclude<FilterId, "all">;
+type AmbiguousSpend = {
+  label: string;
+  amount: number;
+  author: string;
+  createdAt: string;
 };
 
-type CheckinStep = {
-  label: LocalizedText;
-  prompt: LocalizedText;
-  helper: LocalizedText;
-  choices: LocalizedText[];
-};
-
-type Rule = {
-  title: LocalizedText;
-  description: LocalizedText;
-  impact: LocalizedText;
-  enabled: boolean;
+type RuleMemory = {
+  text: string;
+  sourceLabel: string;
+  createdAt: string;
+  createdWeekStart: string;
+  resurfacedWeekStart: string | null;
 };
 
 type PersistedState = {
   locale: Locale;
-  activeTab: TabId;
-  activeFilter: FilterId;
-  checkinIndex: number;
-  checkinAnswers: string[];
-  rules: Rule[];
-  focusLocked: boolean;
+  currentView: ViewId;
+  checkinStep: number;
+  sessionCode: string;
+  currentUserName: string;
+  hasJoinedSession: boolean;
+  participantNames: string[];
+  weekStart: string;
+  revision: number;
+  goalName: string;
+  weeklyBuffer: number;
+  bufferUpdatedBy: string;
+  ambiguousSpend: AmbiguousSpend | null;
+  ruleMemory: RuleMemory | null;
   savedAt: string;
 };
 
@@ -47,151 +46,75 @@ type RemoteStateStatus =
   | "syncing"
   | "connected"
   | "missing-table"
-  | "error";
+  | "error"
+  | "conflict";
 
-const STORAGE_KEY = "bbodong.home-state.v2";
-
-const tabs: Record<TabId, LocalizedText> = {
-  home: { ko: "홈", en: "Home" },
-  timeline: { ko: "타임라인", en: "Timeline" },
-  checkin: { ko: "체크인", en: "Check-in" },
-  rules: { ko: "규칙", en: "Rules" },
+type CheckinPrompt = {
+  step: LocalizedText;
+  title: LocalizedText;
+  helper: LocalizedText;
 };
 
-const filters: { id: FilterId; label: LocalizedText }[] = [
-  { id: "all", label: { ko: "전체", en: "All" } },
-  { id: "alerts", label: { ko: "알림", en: "Alerts" } },
-  { id: "rituals", label: { ko: "루틴", en: "Rituals" } },
-  { id: "notes", label: { ko: "메모", en: "Notes" } },
-];
+type CopyShape = Record<string, LocalizedText>;
 
-const timeline: TimelineItem[] = [
-  {
-    title: { ko: "배달 저녁", en: "Delivery dinner" },
-    amount: { ko: "-₩28,000", en: "-₩28,000" },
-    impact: { ko: "버퍼 영향: -₩28,000", en: "Buffer impact: -₩28,000" },
-    state: { ko: "빠르게 같이 확인 필요", en: "Needs a quick check" },
-    category: "alerts",
-  },
-  {
-    title: { ko: "이번 주 체크인", en: "This week's check-in" },
-    amount: { ko: "일요일 밤 9:00", en: "Sunday, 9:00 PM" },
-    impact: { ko: "3단계, 3분 이내", en: "3 steps, under 3 minutes" },
-    state: { ko: "내일 예정", en: "Due tomorrow" },
-    category: "rituals",
-  },
-  {
-    title: { ko: "공유 상태", en: "Shared state" },
-    amount: { ko: "이번 주는 조금 타이트함", en: "A little tight this week" },
-    impact: { ko: "민지가 추가함", en: "Added by Minji" },
-    state: { ko: "둘 다 확인함", en: "Seen by both" },
-    category: "notes",
-  },
-  {
-    title: { ko: "커피 구매", en: "Coffee run" },
-    amount: { ko: "-₩9,200", en: "-₩9,200" },
-    impact: { ko: "하루 유동 예산 안쪽", en: "Under your daily flex budget" },
-    state: { ko: "추가 조치 없음", en: "No action needed" },
-    category: "alerts",
-  },
-];
+const STORAGE_KEY_PREFIX = "bbodong.home-state.v4";
+const DEFAULT_BUFFER = 180000;
+const REMOTE_SAVE_DEBOUNCE_MS = 250;
 
-const checkinSteps: CheckinStep[] = [
+const prompts: CheckinPrompt[] = [
   {
-    label: { ko: "1. 버퍼", en: "1. Buffer" },
-    prompt: {
-      ko: "이번 주 남은 버퍼가 충분히 안전하다고 느껴지나요?",
-      en: "Does this week's remaining buffer feel safe enough?",
+    step: { ko: "1. 이번 주 여유 확인", en: "1. Check this week's flex" },
+    title: {
+      ko: "이번 주 같이 쓰기로 남겨둔 돈을 확인하세요",
+      en: "Confirm how much you both agreed to leave for this week",
     },
     helper: {
-      ko: "숫자를 먼저 보고, 그 다음 느낌을 말해보세요.",
-      en: "Start with the number, then say the feeling out loud.",
+      ko: "자동 계산처럼 보이지 않게, 직접 합의한 숫자만 적습니다.",
+      en: "Only use the number you agreed on. Do not fake automatic precision.",
     },
-    choices: [
-      { ko: "안전해 보여", en: "Feels safe" },
-      { ko: "조금 타이트해", en: "A bit tight" },
-      { ko: "속도를 줄여야 해", en: "We should slow down" },
-    ],
   },
   {
-    label: { ko: "2. 가장 큰 흔들림", en: "2. Biggest wobble" },
-    prompt: {
-      ko: "이번 주 가장 크게 흔들린 지점은 무엇이었나요?",
-      en: "What created the most friction this week?",
+    step: { ko: "2. 가장 애매한 소비", en: "2. Most ambiguous spend" },
+    title: {
+      ko: "이번 주 가장 다시 얘기해야 할 소비를 하나 고르세요",
+      en: "Pick the one spend that needs a second conversation",
     },
     helper: {
-      ko: "확신을 바꾼 지출이나 패턴 하나만 고르세요.",
-      en: "Pick the one spend or pattern that changed your confidence.",
+      ko: "추천 항목을 고르거나 직접 입력할 수 있습니다.",
+      en: "Use a suggestion or write your own.",
     },
-    choices: [
-      { ko: "배달", en: "Delivery" },
-      { ko: "교통", en: "Transport" },
-      { ko: "모임 약속", en: "Social plans" },
-    ],
   },
   {
-    label: { ko: "3. 규칙 하나 조정", en: "3. Adjust one rule" },
-    prompt: {
-      ko: "다음 주를 더 쉽게 만들 규칙 하나는 무엇인가요?",
-      en: "What one rule would make next week easier?",
+    step: { ko: "3. 다음 주 기준 남기기", en: "3. Leave next week's rule" },
+    title: {
+      ko: "다음 주에도 다시 볼 한 줄 규칙을 남기세요",
+      en: "Write the one-line rule you want to reuse next week",
     },
     helper: {
-      ko: "현실적으로 반복 가능하도록 하나만 바꾸세요.",
-      en: "Only choose one change so it stays realistic.",
+      ko: "통제가 아니라, 우리 둘이 덜 힘들어지기 위한 기준이어야 합니다.",
+      en: "This should feel like a shared standard, not control.",
     },
-    choices: [
-      { ko: "배달 상한 낮추기", en: "Lower delivery cap" },
-      { ko: "무지출 저녁 추가", en: "Add no-spend night" },
-      { ko: "유동 예산 늘리기", en: "Increase flex budget" },
-    ],
   },
 ];
 
-const initialRules: Rule[] = [
+const spendSuggestions = [
+  { ko: "배달", en: "Delivery", amount: 28000 },
+  { ko: "주말 외식", en: "Weekend dinner", amount: 42000 },
+  { ko: "모임 약속", en: "Social plans", amount: 60000 },
+];
+
+const ruleStarters = [
   {
-    title: {
-      ko: "배달 25,000원 초과",
-      en: "Delivery above ₩25,000",
-    },
-    description: {
-      ko: "한 주 흐름이 틀어지기 전에 둘 다 볼 수 있도록 표시합니다.",
-      en: "Flag the spend so both people can see it before the week drifts.",
-    },
-    impact: {
-      ko: "버퍼를 흔들 가능성이 큰 지출을 가장 먼저 잡습니다.",
-      en: "Catches the one purchase most likely to move the buffer.",
-    },
-    enabled: true,
+    ko: "배달이 3만원 넘으면 먼저 공유하기",
+    en: "Share it first if delivery goes over ₩30,000",
   },
   {
-    title: {
-      ko: "주말 유동 예산 70,000원",
-      en: "Weekend flex budget ₩70,000",
-    },
-    description: {
-      ko: "제주 목표를 지키면서도 주말마다 토론으로 번지지 않게 합니다.",
-      en: "Protects the Jeju goal without turning every weekend into a debate.",
-    },
-    impact: {
-      ko: "즉흥 지출을 금지하지 않고 보이게 만듭니다.",
-      en: "Keeps spontaneous spending visible, not forbidden.",
-    },
-    enabled: true,
+    ko: "여행 적금 주에는 주말 외식 1번만",
+    en: "During travel-saving weeks, keep weekend dinner to once",
   },
   {
-    title: {
-      ko: "밤 10시 이후 깜짝 지출 금지",
-      en: "No surprises after 10 PM",
-    },
-    description: {
-      ko: "늦은 밤 결제는 다음 날 아침 확인 전까지 보류합니다.",
-      en: "Late-night spending gets parked until the morning check.",
-    },
-    impact: {
-      ko: "둘 다 피곤할 때 감정적인 결정을 줄입니다.",
-      en: "Reduces emotional decisions when both people are tired.",
-    },
-    enabled: false,
+    ko: "밤 10시 이후 결제는 아침에 다시 보기",
+    en: "Revisit after-10PM purchases in the morning",
   },
 ];
 
@@ -201,266 +124,8 @@ const copy = {
     en: "Newly married, dual-income",
   },
   appDescription: {
-    ko: "돈 얘기가 괜한 긴장으로 번지기 전에 같이 보는 주간 버퍼 보드.",
-    en: "A shared weekly buffer board for the moments that usually turn into unnecessary tension.",
-  },
-  connection: {
-    ko: "연결 상태",
-    en: "Connection",
-  },
-  weekSummary: {
-    ko: "이번 주",
-    en: "This week",
-  },
-  oneAlertOneRitualOneNote: {
-    ko: "알림 1개, 루틴 1개, 메모 1개",
-    en: "One alert, one ritual, one note",
-  },
-  enoughContext: {
-    ko: "돈 관리가 숙제가 되지 않을 만큼만, 빠르게 맞출 수 있는 정보만 보여줍니다.",
-    en: "Enough context to align fast without turning finance into homework.",
-  },
-  connectionHelp: {
-    ko: "환경 변수가 없어도 화면은 깨지지 않고, 연결 상태만 분명하게 보여줍니다.",
-    en: "The UI stays usable even if env vars are missing, and shows the connection state clearly.",
-  },
-  storage: {
-    ko: "저장",
-    en: "Storage",
-  },
-  savedOnDevice: {
-    ko: "이 기기에 저장됨",
-    en: "Saved on this device",
-  },
-  noSavedState: {
-    ko: "아직 저장된 상태가 없습니다.",
-    en: "No saved state yet.",
-  },
-  resetLocal: {
-    ko: "로컬 초기화",
-    en: "Reset local",
-  },
-  remoteLocalOnly: {
-    ko: "이 세션에서는 원격 동기화가 꺼져 있습니다.",
-    en: "Remote sync is off for this session.",
-  },
-  remoteSyncing: {
-    ko: "Supabase 상태를 확인하는 중입니다...",
-    en: "Checking Supabase state...",
-  },
-  remoteConnected: {
-    ko: "Supabase 테이블에 연결 가능합니다. 로컬 변경을 원격으로 동기화할 수 있습니다.",
-    en: "Supabase table is reachable. Local changes can sync remotely.",
-  },
-  remoteMissingTable: {
-    ko: "Supabase는 설정됐지만 app_state 테이블이 아직 없습니다.",
-    en: "Supabase is configured, but the app_state table is not created yet.",
-  },
-  remoteError: {
-    ko: "Supabase 동기화에 실패했습니다. 로컬 저장은 계속 동작합니다.",
-    en: "Supabase sync failed. Local persistence still works.",
-  },
-  weeklyBuffer: {
-    ko: "주간 버퍼",
-    en: "Weekly buffer",
-  },
-  bufferDescription: {
-    ko: "아직은 괜찮지만, 충동적인 주문 한 번이면 이번 주 체감이 훨씬 더 타이트해집니다.",
-    en: "You are still on track, but one more impulse order makes the week feel tighter than it needs to.",
-  },
-  seenByBoth: {
-    ko: "둘 다 확인함",
-    en: "Seen by both",
-  },
-  jejuInSixWeeks: {
-    ko: "제주까지 6주",
-    en: "Jeju in 6 weeks",
-  },
-  focusLocked: {
-    ko: "집중 잠금",
-    en: "Focus locked",
-  },
-  focusOpen: {
-    ko: "집중 열림",
-    en: "Focus open",
-  },
-  remoteSyncReady: {
-    ko: "원격 동기화 준비됨",
-    en: "Remote sync ready",
-  },
-  jejuTripFund: {
-    ko: "제주 여행 적립",
-    en: "Jeju trip fund",
-  },
-  goalPace: {
-    ko: "현재 속도면 배달 규칙이 유지될 때 6주 안에 목표에 도달합니다.",
-    en: "At this pace, you hit the goal in 6 weeks if the delivery rule holds.",
-  },
-  oneThingToCheck: {
-    ko: "함께 볼 한 가지",
-    en: "One thing to check",
-  },
-  deliveryOffCourse: {
-    ko: "배달 저녁이 이번 주 흐름을 흔들고 있어요",
-    en: "Delivery dinner is pushing this week off course",
-  },
-  needsBoth: {
-    ko: "둘 다 필요",
-    en: "Needs both",
-  },
-  amount: {
-    ko: "금액",
-    en: "Amount",
-  },
-  ruleHit: {
-    ko: "걸린 규칙",
-    en: "Rule hit",
-  },
-  goalDelay: {
-    ko: "목표 지연",
-    en: "Goal delay",
-  },
-  checkTogether: {
-    ko: "같이 확인하기",
-    en: "Check together",
-  },
-  keepAsIs: {
-    ko: "그대로 두기",
-    en: "Keep as is",
-  },
-  workspace: {
-    ko: "공유 공간",
-    en: "Workspace",
-  },
-  workspaceTitle: {
-    ko: "복잡하지 않게 공유 상태 보기",
-    en: "Shared state, without the clutter",
-  },
-  openTimeline: {
-    ko: "타임라인 열기",
-    en: "Open timeline",
-  },
-  sharedStateDesc: {
-    ko: "민지가 추가함. 다음 결정을 바꾸기엔 충분히 보이게 유지합니다.",
-    en: "Added by Minji. Visible enough to guide the next decision.",
-  },
-  weeklyCheckin: {
-    ko: "주간 체크인",
-    en: "Weekly check-in",
-  },
-  tomorrowNine: {
-    ko: "내일 밤 9:00",
-    en: "Tomorrow, 9:00 PM",
-  },
-  noExtraAdmin: {
-    ko: "버퍼, 흔들림, 규칙 하나. 추가 행정은 없습니다.",
-    en: "Buffer, wobble, one rule change. No extra admin.",
-  },
-  ruleCoverage: {
-    ko: "규칙 커버리지",
-    en: "Rule coverage",
-  },
-  activeGuardrails: {
-    ko: "활성 가드레일",
-    en: "active guardrails",
-  },
-  lightStructure: {
-    ko: "작은 문제가 계속 작게 남도록 최소한의 구조만 둡니다.",
-    en: "Light structure so small issues stay small.",
-  },
-  quickJump: {
-    ko: "빠른 이동",
-    en: "Quick jump",
-  },
-  plannedFlow: {
-    ko: "계획된 흐름, 실제 동작까지 연결",
-    en: "Planned flow, fully wired",
-  },
-  tabDescriptions: {
-    home: {
-      ko: "버퍼, 포커스 카드, 공유 맥락",
-      en: "Buffer, focus card, and shared context",
-    },
-    timeline: {
-      ko: "중요한 순간만 빠르게 필터링",
-      en: "Moments that matter, filtered fast",
-    },
-    checkin: {
-      ko: "답이 저장되는 3단계 루틴",
-      en: "Three-step ritual with saved answers",
-    },
-    rules: {
-      ko: "켜고 끌 수 있는 가벼운 규칙",
-      en: "Guardrails you can switch on and off",
-    },
-  },
-  open: {
-    ko: "열림",
-    en: "Open",
-  },
-  view: {
-    ko: "보기",
-    en: "View",
-  },
-  sharedTimeline: {
-    ko: "공유 타임라인",
-    en: "Shared timeline",
-  },
-  momentsThatMatter: {
-    ko: "중요한 순간만 남기기",
-    en: "Only the moments that matter",
-  },
-  currentPosture: {
-    ko: "현재 톤",
-    en: "Current posture",
-  },
-  planSmallOnPurpose: {
-    ko: "이 플랜은 일부러 작게 만들었습니다",
-    en: "The plan is small on purpose",
-  },
-  postureDescription: {
-    ko: "논의할 알림 하나, 맥락을 붙잡는 메모 하나, 주를 다시 보는 루틴 하나. 첫 버전에서 실제로 계속 쓰게 만들기엔 그 정도면 충분합니다.",
-    en: "One alert to discuss, one shared note to hold context, one ritual to revisit the week. That is enough for a first version people will actually keep using.",
-  },
-  timelineTitle: {
-    ko: "주의가 필요한 기준으로 이번 주 보기",
-    en: "Filter the week by what needs attention",
-  },
-  checkinTitle: {
-    ko: "3단계, 3분 이내",
-    en: "Three steps, under three minutes",
-  },
-  completed: {
-    ko: "완료됨",
-    en: "Completed",
-  },
-  concretePlan: {
-    ko: "다음 주를 위한 구체적인 합의가 생겼어요",
-    en: "You have a concrete plan for next week",
-  },
-  runAgain: {
-    ko: "다시 하기",
-    en: "Run it again",
-  },
-  whyThisWorks: {
-    ko: "왜 이게 먹히는가",
-    en: "Why this works",
-  },
-  ritualRepeats: {
-    ko: "이 루틴은 반복 가능한 정도로만 좁혀져 있습니다",
-    en: "The ritual is focused enough to repeat",
-  },
-  ritualDescription: {
-    ko: "이 앱은 전체 예산 관리를 요구하지 않습니다. 느낌 하나, 흔들림 하나, 다음 조정 하나만 꺼내도록 돕습니다.",
-    en: "The app does not ask for full budgeting. It only helps the couple surface the one feeling, one wobble, and one next adjustment.",
-  },
-  rulesTitle: {
-    ko: "가볍고, 보이고, 조정 가능한 규칙 유지하기",
-    en: "Keep guardrails light, visible, and adjustable",
-  },
-  enabled: {
-    ko: "활성",
-    en: "enabled",
+    ko: "돈 얘기가 싸움으로 번지기 전에, 이번 주 기준만 빠르게 맞추는 공유 체크인.",
+    en: "A shared check-in that aligns this week's standard before money talk turns into friction.",
   },
   language: {
     ko: "언어",
@@ -474,6 +139,46 @@ const copy = {
     ko: "영어",
     en: "English",
   },
+  connection: {
+    ko: "연결 상태",
+    en: "Connection",
+  },
+  storage: {
+    ko: "저장",
+    en: "Storage",
+  },
+  resetLocal: {
+    ko: "로컬 초기화",
+    en: "Reset local",
+  },
+  noSavedState: {
+    ko: "아직 저장된 상태가 없습니다.",
+    en: "No saved state yet.",
+  },
+  remoteLocalOnly: {
+    ko: "이 세션에서는 원격 동기화가 꺼져 있습니다.",
+    en: "Remote sync is off for this session.",
+  },
+  remoteSyncing: {
+    ko: "Supabase 상태를 확인하는 중입니다...",
+    en: "Checking Supabase state...",
+  },
+  remoteConnected: {
+    ko: "같은 세션 코드로 들어오면 같은 상태를 같이 봅니다.",
+    en: "Anyone opening this session code sees the same shared state.",
+  },
+  remoteMissingTable: {
+    ko: "Supabase는 설정됐지만 공유 세션 테이블이 아직 없습니다.",
+    en: "Supabase is configured, but the shared session tables are not created yet.",
+  },
+  remoteError: {
+    ko: "Supabase 동기화에 실패했습니다. 로컬 저장은 계속 동작합니다.",
+    en: "Supabase sync failed. Local persistence still works.",
+  },
+  remoteConflict: {
+    ko: "다른 사람이 더 최신 상태를 저장해서 지금 변경은 자동 저장하지 않았습니다. 화면을 다시 확인하세요.",
+    en: "Someone else saved a newer version first, so this change was not auto-saved. Refresh your view.",
+  },
   connected: {
     ko: "Supabase 연결됨",
     en: "Supabase connected",
@@ -482,7 +187,215 @@ const copy = {
     ko: "Supabase 미설정",
     en: "Supabase not configured",
   },
-} as const;
+  session: {
+    ko: "공유 세션",
+    en: "Shared session",
+  },
+  sessionCode: {
+    ko: "세션 코드",
+    en: "Session code",
+  },
+  sessionHelp: {
+    ko: "같은 링크나 코드로 들어오면 같은 체크인 상태를 봅니다.",
+    en: "Open the same link or code to land in the same shared check-in state.",
+  },
+  shareLink: {
+    ko: "공유 링크",
+    en: "Share link",
+  },
+  joinCode: {
+    ko: "다른 세션 코드로 이동",
+    en: "Switch to another session code",
+  },
+  newSession: {
+    ko: "새 세션 만들기",
+    en: "Create new session",
+  },
+  joinSession: {
+    ko: "이 코드로 열기",
+    en: "Open this code",
+  },
+  joinCurrentSession: {
+    ko: "세션 참여하기",
+    en: "Join this session",
+  },
+  yourName: {
+    ko: "내 이름",
+    en: "Your name",
+  },
+  participantStatus: {
+    ko: "참여 상태",
+    en: "Participants",
+  },
+  youJoined: {
+    ko: "내 참여 상태",
+    en: "Your join state",
+  },
+  joinedAs: {
+    ko: "이 이름으로 참여 중",
+    en: "Joined as",
+  },
+  notJoinedYet: {
+    ko: "아직 이 세션에 참여하지 않았습니다.",
+    en: "You have not joined this session yet.",
+  },
+  waitingPartner: {
+    ko: "아직 상대가 안 들어왔습니다.",
+    en: "The other person has not joined yet.",
+  },
+  partnerJoined: {
+    ko: "둘 다 같은 세션에 들어왔습니다.",
+    en: "Both people have joined the same session.",
+  },
+  goal: {
+    ko: "공유 목표",
+    en: "Shared goal",
+  },
+  buffer: {
+    ko: "이번 주 같이 쓰기로 남겨둔 돈",
+    en: "Money you both left for this week",
+  },
+  bufferHelp: {
+    ko: "자동 계산값이 아니라, 둘이 직접 합의한 주간 여유분입니다.",
+    en: "This is not an automatic calculation. It is the weekly flex amount you agreed on.",
+  },
+  updatedBy: {
+    ko: "최근 수정",
+    en: "Latest update",
+  },
+  revisionLabel: {
+    ko: "버전",
+    en: "Revision",
+  },
+  ambiguousSpend: {
+    ko: "이번 주 가장 애매한 소비",
+    en: "This week's most ambiguous spend",
+  },
+  noAmbiguousSpend: {
+    ko: "아직 적어둔 애매한 소비가 없습니다.",
+    en: "No ambiguous spend recorded yet.",
+  },
+  currentRule: {
+    ko: "우리의 현재 규칙",
+    en: "Our current rule",
+  },
+  resurfacedRule: {
+    ko: "이번 주 다시 떠오른 규칙",
+    en: "Rule resurfaced this week",
+  },
+  noRule: {
+    ko: "아직 남겨둔 규칙이 없습니다.",
+    en: "No shared rule yet.",
+  },
+  noRuleThisWeek: {
+    ko: "이번 주에 다시 떠오를 규칙은 아직 없습니다.",
+    en: "No rule has resurfaced for this week yet.",
+  },
+  checkinStatus: {
+    ko: "이번 주 체크인 상태",
+    en: "This week's check-in",
+  },
+  checkinIncomplete: {
+    ko: "아직 기준을 정하지 않았습니다.",
+    en: "You have not locked this week's standard yet.",
+  },
+  checkinComplete: {
+    ko: "다음 주에도 다시 볼 기준이 저장됐습니다.",
+    en: "A rule for next week has been saved.",
+  },
+  beginCheckin: {
+    ko: "이번 주 기준 정하기",
+    en: "Set this week's standard",
+  },
+  reviewRuleMemory: {
+    ko: "규칙 메모 보기",
+    en: "Open rule memory",
+  },
+  backHome: {
+    ko: "홈으로",
+    en: "Back home",
+  },
+  checkinProgress: {
+    ko: "체크인 진행",
+    en: "Check-in progress",
+  },
+  bufferLabel: {
+    ko: "합의된 주간 여유분",
+    en: "Agreed weekly flex amount",
+  },
+  updatedByLabel: {
+    ko: "누가 마지막으로 수정했나요?",
+    en: "Who last updated it?",
+  },
+  continue: {
+    ko: "계속하기",
+    en: "Continue",
+  },
+  back: {
+    ko: "이전",
+    en: "Back",
+  },
+  customSpendLabel: {
+    ko: "직접 입력한 항목",
+    en: "Custom spend label",
+  },
+  amountLabel: {
+    ko: "금액",
+    en: "Amount",
+  },
+  chooseSuggestion: {
+    ko: "추천 항목",
+    en: "Suggested items",
+  },
+  ruleStarter: {
+    ko: "시작 문장",
+    en: "Rule starters",
+  },
+  ruleTextarea: {
+    ko: "우리 규칙",
+    en: "Our rule",
+  },
+  saveRule: {
+    ko: "규칙 저장하기",
+    en: "Save rule",
+  },
+  restartCheckin: {
+    ko: "체크인 다시 하기",
+    en: "Restart check-in",
+  },
+  sourceSpend: {
+    ko: "출발점 소비",
+    en: "Source spend",
+  },
+  savedRuleMemory: {
+    ko: "저장된 규칙 메모",
+    en: "Saved rule memory",
+  },
+  noRuleHistory: {
+    ko: "다음 주에도 다시 볼 규칙이 아직 없습니다.",
+    en: "There is no rule ready to resurface next week yet.",
+  },
+  reopenCheckin: {
+    ko: "다시 기준 정하기",
+    en: "Set a new rule",
+  },
+  stickyHint: {
+    ko: "3분 안에 끝내는 흐름으로만 남깁니다.",
+    en: "This flow is intentionally constrained to stay under three minutes.",
+  },
+  joinBeforeCheckin: {
+    ko: "체크인을 시작하기 전에 먼저 세션에 참여하세요.",
+    en: "Join the session before starting the check-in.",
+  },
+  currentWeekLabel: {
+    ko: "이번 주 시작",
+    en: "Week start",
+  },
+  ruleCreatedWeek: {
+    ko: "규칙 작성 주",
+    en: "Rule written in week",
+  },
+} satisfies CopyShape;
 
 function getBrowserStorage() {
   if (typeof window === "undefined") {
@@ -503,12 +416,103 @@ function getBrowserStorage() {
   return storage;
 }
 
-function translate(text: LocalizedText, locale: Locale) {
-  return text[locale];
+function safeLocale(value: unknown): Locale {
+  return value === "en" ? "en" : "ko";
+}
+
+function parseNumber(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function renderBadge(hasConfig: boolean, locale: Locale) {
   return hasConfig ? copy.connected[locale] : copy.notConfigured[locale];
+}
+
+function formatCurrency(value: number, locale: Locale) {
+  return new Intl.NumberFormat(locale === "ko" ? "ko-KR" : "en-US", {
+    style: "currency",
+    currency: "KRW",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function formatDate(value: string, locale: Locale) {
+  return new Date(value).toLocaleString(locale === "ko" ? "ko-KR" : "en-US");
+}
+
+function getWeekStartFromDate(value: Date) {
+  const normalized = new Date(value);
+  normalized.setHours(0, 0, 0, 0);
+  const day = normalized.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  normalized.setDate(normalized.getDate() + diff);
+  return normalized.toISOString().slice(0, 10);
+}
+
+function getCurrentWeekStart() {
+  return getWeekStartFromDate(new Date());
+}
+
+function normalizeSessionCode(value: string) {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+}
+
+function createSessionCode() {
+  return `BBO${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+}
+
+function getStorageKey(sessionCode: string) {
+  return `${STORAGE_KEY_PREFIX}.${sessionCode}`;
+}
+
+function getUrlSessionCode() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  return normalizeSessionCode(params.get("session") ?? "");
+}
+
+function replaceUrlSessionCode(sessionCode: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  url.searchParams.set("session", sessionCode);
+  window.history.replaceState({}, "", url.toString());
+}
+
+function getDefaultState(sessionCode: string): PersistedState {
+  return {
+    locale: "ko",
+    currentView: "home",
+    checkinStep: 0,
+    sessionCode,
+    currentUserName: "지훈",
+    hasJoinedSession: false,
+    participantNames: [],
+    weekStart: getCurrentWeekStart(),
+    revision: 0,
+    goalName: "제주 여행 적금",
+    weeklyBuffer: DEFAULT_BUFFER,
+    bufferUpdatedBy: "지훈",
+    ambiguousSpend: null,
+    ruleMemory: null,
+    savedAt: "",
+  };
+}
+
+function buildShareUrl(sessionCode: string) {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const url = new URL(window.location.href);
+  url.searchParams.set("session", sessionCode);
+  return url.toString();
 }
 
 export function HomeClient({
@@ -518,18 +522,46 @@ export function HomeClient({
   hasSupabaseConfig: boolean;
   enableRemoteSync?: boolean;
 }) {
+  const [sessionCode, setSessionCode] = useState("");
   const [locale, setLocale] = useState<Locale>("ko");
-  const [activeTab, setActiveTab] = useState<TabId>("home");
-  const [activeFilter, setActiveFilter] = useState<FilterId>("all");
-  const [checkinIndex, setCheckinIndex] = useState(0);
-  const [checkinAnswers, setCheckinAnswers] = useState<string[]>([]);
-  const [rules, setRules] = useState(initialRules);
-  const [focusLocked, setFocusLocked] = useState(false);
+  const [currentView, setCurrentView] = useState<ViewId>("home");
+  const [checkinStep, setCheckinStep] = useState(0);
+  const [currentUserName, setCurrentUserName] = useState("지훈");
+  const [hasJoinedSession, setHasJoinedSession] = useState(false);
+  const [participantNames, setParticipantNames] = useState<string[]>([]);
+  const [weekStart, setWeekStart] = useState(getCurrentWeekStart());
+  const [revision, setRevision] = useState(0);
+  const [goalName, setGoalName] = useState("제주 여행 적금");
+  const [weeklyBuffer, setWeeklyBuffer] = useState(DEFAULT_BUFFER);
+  const [bufferUpdatedBy, setBufferUpdatedBy] = useState("지훈");
+  const [ambiguousSpend, setAmbiguousSpend] = useState<AmbiguousSpend | null>(null);
+  const [ruleMemory, setRuleMemory] = useState<RuleMemory | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [remoteStateStatus, setRemoteStateStatus] =
     useState<RemoteStateStatus>("local-only");
+  const [bufferInput, setBufferInput] = useState(String(DEFAULT_BUFFER));
+  const [spendLabelInput, setSpendLabelInput] = useState("");
+  const [spendAmountInput, setSpendAmountInput] = useState("");
+  const [ruleDraft, setRuleDraft] = useState("");
+  const [joinCodeInput, setJoinCodeInput] = useState("");
   const skipNextPersistRef = useRef(false);
+  const remoteSaveTimerRef = useRef<number | null>(null);
+  const hasLocalEditsRef = useRef(false);
+
+  const completedCheckin = Boolean(ruleMemory);
+  const localizedSavedAt = lastSavedAt ? formatDate(lastSavedAt, locale) : null;
+  const localizedBuffer = formatCurrency(weeklyBuffer, locale);
+  const localizedSpendAmount = ambiguousSpend
+    ? formatCurrency(ambiguousSpend.amount, locale)
+    : null;
+  const shareUrl = useMemo(() => buildShareUrl(sessionCode), [sessionCode]);
+  const partnerJoined = participantNames.length > 1;
+  const participantSummary = participantNames.join(", ");
+  const resurfacedThisWeek = Boolean(
+    ruleMemory && ruleMemory.resurfacedWeekStart === weekStart,
+  );
+  const remoteTablesMissing = remoteStateStatus === "missing-table";
 
   useEffect(() => {
     if (typeof document !== "undefined") {
@@ -538,54 +570,109 @@ export function HomeClient({
   }, [locale]);
 
   useEffect(() => {
+    const nextSessionCode = getUrlSessionCode() || createSessionCode();
+    replaceUrlSessionCode(nextSessionCode);
+    setSessionCode(nextSessionCode);
+    setJoinCodeInput(nextSessionCode);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionCode) {
+      return;
+    }
+
+    const defaultState = getDefaultState(sessionCode);
+
     const applyPersistedState = (parsedState: Partial<PersistedState>) => {
-      if (parsedState.locale) {
-        setLocale(parsedState.locale);
-      }
+      setLocale(safeLocale(parsedState.locale));
+      setCurrentView(
+        parsedState.currentView === "checkin" || parsedState.currentView === "rules"
+          ? parsedState.currentView
+          : "home",
+      );
+      setCheckinStep(
+        typeof parsedState.checkinStep === "number" ? parsedState.checkinStep : 0,
+      );
 
-      if (parsedState.activeTab) {
-        setActiveTab(parsedState.activeTab);
-      }
+      const nextName =
+        typeof parsedState.currentUserName === "string" && parsedState.currentUserName
+          ? parsedState.currentUserName
+          : defaultState.currentUserName;
+      setCurrentUserName(nextName);
+      setHasJoinedSession(
+        typeof parsedState.hasJoinedSession === "boolean"
+          ? parsedState.hasJoinedSession
+          : defaultState.hasJoinedSession,
+      );
 
-      if (parsedState.activeFilter) {
-        setActiveFilter(parsedState.activeFilter);
-      }
+      const nextParticipants =
+        Array.isArray(parsedState.participantNames) && parsedState.participantNames.length > 0
+          ? Array.from(new Set(parsedState.participantNames.filter(Boolean)))
+          : [];
+      setParticipantNames(nextParticipants);
+      setWeekStart(
+        typeof parsedState.weekStart === "string" && parsedState.weekStart
+          ? parsedState.weekStart
+          : defaultState.weekStart,
+      );
+      setRevision(
+        typeof parsedState.revision === "number" && parsedState.revision >= 0
+          ? parsedState.revision
+          : defaultState.revision,
+      );
 
-      if (typeof parsedState.checkinIndex === "number") {
-        setCheckinIndex(parsedState.checkinIndex);
-      }
+      setGoalName(
+        typeof parsedState.goalName === "string" && parsedState.goalName
+          ? parsedState.goalName
+          : defaultState.goalName,
+      );
 
-      if (Array.isArray(parsedState.checkinAnswers)) {
-        setCheckinAnswers(parsedState.checkinAnswers);
-      }
+      const nextBuffer =
+        typeof parsedState.weeklyBuffer === "number"
+          ? parsedState.weeklyBuffer
+          : defaultState.weeklyBuffer;
+      setWeeklyBuffer(nextBuffer);
+      setBufferInput(String(nextBuffer));
 
-      if (Array.isArray(parsedState.rules) && parsedState.rules.length === initialRules.length) {
-        setRules(parsedState.rules);
-      }
+      const nextBufferUpdatedBy =
+        typeof parsedState.bufferUpdatedBy === "string" && parsedState.bufferUpdatedBy
+          ? parsedState.bufferUpdatedBy
+          : nextName;
+      setBufferUpdatedBy(nextBufferUpdatedBy);
 
-      if (typeof parsedState.focusLocked === "boolean") {
-        setFocusLocked(parsedState.focusLocked);
-      }
-
-      if (typeof parsedState.savedAt === "string") {
-        setLastSavedAt(parsedState.savedAt);
-      }
+      setAmbiguousSpend(parsedState.ambiguousSpend ?? null);
+      setRuleMemory(parsedState.ruleMemory ?? null);
+      setSpendLabelInput(parsedState.ambiguousSpend?.label ?? "");
+      setSpendAmountInput(
+        parsedState.ambiguousSpend ? String(parsedState.ambiguousSpend.amount) : "",
+      );
+      setRuleDraft(parsedState.ruleMemory?.text ?? "");
+      setLastSavedAt(
+        typeof parsedState.savedAt === "string" && parsedState.savedAt
+          ? parsedState.savedAt
+          : null,
+      );
     };
 
     const loadState = async () => {
+      setIsHydrated(false);
       const storage = getBrowserStorage();
 
       try {
-        const storedState = storage?.getItem(STORAGE_KEY);
+        const storedState = storage?.getItem(getStorageKey(sessionCode));
 
         if (storedState) {
           applyPersistedState(JSON.parse(storedState) as Partial<PersistedState>);
+        } else {
+          applyPersistedState(defaultState);
         }
       } catch {
-        storage?.removeItem(STORAGE_KEY);
+        storage?.removeItem(getStorageKey(sessionCode));
+        applyPersistedState(defaultState);
       }
 
       if (!enableRemoteSync || !hasSupabaseConfig || !supabase) {
+        hasLocalEditsRef.current = false;
         setRemoteStateStatus("local-only");
         setIsHydrated(true);
         return;
@@ -593,33 +680,83 @@ export function HomeClient({
 
       try {
         setRemoteStateStatus("syncing");
-
-        const { data, error } = await supabase
-          .from("app_state")
-          .select(
-            "active_tab, active_filter, checkin_index, checkin_answers, rules, focus_locked, updated_at",
-          )
-          .eq("id", "default")
+        const client = supabase;
+        const sessionResult = await client
+          .from("shared_sessions")
+          .select("id, locale, goal_name, updated_at")
+          .eq("id", sessionCode)
           .maybeSingle();
 
-        if (error) {
-          if (error.code === "PGRST205") {
+        if (sessionResult.error?.code === "PGRST205") {
+          setRemoteStateStatus("missing-table");
+          return;
+        }
+
+        const [weeklyStateResult, ruleMemoryResult, participantsResult] =
+          await Promise.all([
+            client
+              .from("weekly_states")
+              .select(
+                "session_id, week_start, revision, current_view, checkin_step, weekly_buffer, buffer_updated_by, ambiguous_spend, updated_at",
+              )
+              .eq("session_id", sessionCode)
+              .maybeSingle(),
+            client
+              .from("rule_memories")
+              .select("session_id, rule_text, source_spend_label, created_at, created_week_start, resurfaced_week_start")
+              .eq("session_id", sessionCode)
+              .maybeSingle(),
+            client
+              .from("session_participants")
+              .select("session_id, participant_name")
+              .eq("session_id", sessionCode),
+          ]);
+
+        const firstError =
+          sessionResult.error ??
+          weeklyStateResult.error ??
+          ruleMemoryResult.error ??
+          participantsResult.error;
+
+        if (firstError) {
+          if (firstError.code === "PGRST205") {
             setRemoteStateStatus("missing-table");
           } else {
             setRemoteStateStatus("error");
           }
-        } else if (data) {
+        } else if (sessionResult.data || weeklyStateResult.data || ruleMemoryResult.data) {
+          const remoteParticipants = Array.isArray(participantsResult.data)
+            ? participantsResult.data
+                .map((participant) => participant.participant_name)
+                .filter(Boolean)
+            : [];
+
           applyPersistedState({
-            activeTab: data.active_tab as TabId,
-            activeFilter: data.active_filter as FilterId,
-            checkinIndex: data.checkin_index,
-            checkinAnswers: data.checkin_answers as string[],
-            rules: data.rules as Rule[],
-            focusLocked: data.focus_locked,
-            savedAt: data.updated_at,
+            locale: sessionResult.data?.locale,
+            currentView: weeklyStateResult.data?.current_view,
+            checkinStep: weeklyStateResult.data?.checkin_step,
+            participantNames: remoteParticipants,
+            weekStart: weeklyStateResult.data?.week_start,
+            revision: weeklyStateResult.data?.revision,
+            goalName: sessionResult.data?.goal_name,
+            weeklyBuffer: weeklyStateResult.data?.weekly_buffer,
+            bufferUpdatedBy: weeklyStateResult.data?.buffer_updated_by,
+            ambiguousSpend: weeklyStateResult.data?.ambiguous_spend,
+            ruleMemory: ruleMemoryResult.data
+              ? {
+                  text: ruleMemoryResult.data.rule_text,
+                  sourceLabel: ruleMemoryResult.data.source_spend_label,
+                  createdAt: ruleMemoryResult.data.created_at,
+                  createdWeekStart: ruleMemoryResult.data.created_week_start,
+                  resurfacedWeekStart: ruleMemoryResult.data.resurfaced_week_start,
+                }
+              : null,
+            savedAt: weeklyStateResult.data?.updated_at ?? sessionResult.data?.updated_at,
           });
+          hasLocalEditsRef.current = false;
           setRemoteStateStatus("connected");
         } else {
+          hasLocalEditsRef.current = false;
           setRemoteStateStatus("connected");
         }
       } catch {
@@ -630,10 +767,80 @@ export function HomeClient({
     };
 
     void loadState();
-  }, [enableRemoteSync, hasSupabaseConfig]);
+  }, [enableRemoteSync, hasSupabaseConfig, sessionCode]);
 
   useEffect(() => {
-    if (!isHydrated) {
+    if (
+      !enableRemoteSync ||
+      !hasSupabaseConfig ||
+      !supabase ||
+      !sessionCode ||
+      remoteStateStatus !== "connected"
+    ) {
+      return;
+    }
+
+    const client = supabase;
+
+    const pollParticipants = async () => {
+      const { data, error } = await client
+        .from("session_participants")
+        .select("session_id, participant_name")
+        .eq("session_id", sessionCode);
+
+      if (error) {
+        return;
+      }
+
+      const remoteParticipants = Array.isArray(data)
+        ? Array.from(
+            new Set(data.map((participant) => participant.participant_name).filter(Boolean)),
+          )
+        : [];
+
+      setParticipantNames(remoteParticipants);
+      setHasJoinedSession(remoteParticipants.includes(currentUserName.trim()));
+    };
+
+    void pollParticipants();
+    const intervalId = window.setInterval(() => {
+      void pollParticipants();
+    }, 3000);
+
+    return () => window.clearInterval(intervalId);
+  }, [
+    currentUserName,
+    enableRemoteSync,
+    hasSupabaseConfig,
+    remoteStateStatus,
+    sessionCode,
+  ]);
+
+  useEffect(() => {
+    const currentWeekStart = getCurrentWeekStart();
+
+    if (weekStart === currentWeekStart) {
+      return;
+    }
+
+    setWeekStart(currentWeekStart);
+    setCurrentView("home");
+    setCheckinStep(0);
+
+    setRuleMemory((currentRuleMemory) => {
+      if (!currentRuleMemory) {
+        return null;
+      }
+
+      return {
+        ...currentRuleMemory,
+        resurfacedWeekStart: currentWeekStart,
+      };
+    });
+  }, [weekStart]);
+
+  useEffect(() => {
+    if (!sessionCode || !isHydrated) {
       return;
     }
 
@@ -645,106 +852,319 @@ export function HomeClient({
     const savedAt = new Date().toISOString();
     const nextState: PersistedState = {
       locale,
-      activeTab,
-      activeFilter,
-      checkinIndex,
-      checkinAnswers,
-      rules,
-      focusLocked,
+      currentView,
+      checkinStep,
+      sessionCode,
+      currentUserName,
+      hasJoinedSession,
+      participantNames,
+      weekStart,
+      revision,
+      goalName,
+      weeklyBuffer,
+      bufferUpdatedBy,
+      ambiguousSpend,
+      ruleMemory,
       savedAt,
     };
 
-    getBrowserStorage()?.setItem(STORAGE_KEY, JSON.stringify(nextState));
+    getBrowserStorage()?.setItem(getStorageKey(sessionCode), JSON.stringify(nextState));
     setLastSavedAt(savedAt);
 
-    if (!enableRemoteSync || !hasSupabaseConfig || !supabase) {
+    if (!enableRemoteSync || !hasSupabaseConfig || !supabase || remoteTablesMissing) {
       return;
     }
 
-    void supabase
-      .from("app_state")
-      .upsert(
-        {
-          id: "default",
-          active_tab: activeTab,
-          active_filter: activeFilter,
-          checkin_index: checkinIndex,
-          checkin_answers: checkinAnswers,
-          rules,
-          focus_locked: focusLocked,
-          updated_at: savedAt,
-        },
-        { onConflict: "id" },
-      )
-      .then(({ error }) => {
-        if (!error) {
+    if (!hasLocalEditsRef.current) {
+      return;
+    }
+
+    const client = supabase;
+    const uniqueParticipants = Array.from(
+      new Set(participantNames.map((participant) => participant.trim()).filter(Boolean)),
+    );
+
+    if (remoteSaveTimerRef.current) {
+      window.clearTimeout(remoteSaveTimerRef.current);
+    }
+
+    remoteSaveTimerRef.current = window.setTimeout(() => {
+      void (async () => {
+        const revisionResult = await client
+          .from("weekly_states")
+          .select("session_id, revision")
+          .eq("session_id", sessionCode)
+          .maybeSingle();
+
+        if (revisionResult.error) {
+          if (revisionResult.error.code === "PGRST205") {
+            setRemoteStateStatus("missing-table");
+            return;
+          }
+
+          setRemoteStateStatus("error");
+          return;
+        }
+
+        const remoteRevision =
+          typeof revisionResult.data?.revision === "number" ? revisionResult.data.revision : 0;
+
+        if (remoteRevision > revision) {
+          setRemoteStateStatus("conflict");
+          return;
+        }
+
+        const nextRevision = remoteRevision + 1;
+        const sharedSessionResult = await client
+          .from("shared_sessions")
+          .upsert(
+            {
+              id: sessionCode,
+              locale,
+              goal_name: goalName,
+              updated_at: savedAt,
+            },
+            { onConflict: "id" },
+          );
+
+        if (sharedSessionResult.error) {
+          if (sharedSessionResult.error.code === "PGRST205") {
+            setRemoteStateStatus("missing-table");
+            return;
+          }
+
+          setRemoteStateStatus("error");
+          return;
+        }
+
+        const results = await Promise.all([
+          client
+            .from("weekly_states")
+            .upsert(
+              {
+                session_id: sessionCode,
+                week_start: weekStart,
+                revision: nextRevision,
+                current_view: currentView,
+                checkin_step: checkinStep,
+                weekly_buffer: weeklyBuffer,
+                buffer_updated_by: bufferUpdatedBy,
+                ambiguous_spend: ambiguousSpend,
+                updated_at: savedAt,
+              },
+              { onConflict: "session_id" },
+            ),
+          ...(hasJoinedSession
+            ? uniqueParticipants.map((participantName) =>
+                client
+                  .from("session_participants")
+                  .upsert(
+                    {
+                      session_id: sessionCode,
+                      participant_name: participantName,
+                    },
+                    { onConflict: "session_id,participant_name" },
+                  ),
+              )
+            : []),
+          ...(ruleMemory
+            ? [
+                client
+                  .from("rule_memories")
+                  .upsert(
+                    {
+                      session_id: sessionCode,
+                      rule_text: ruleMemory.text,
+                      source_spend_label: ruleMemory.sourceLabel,
+                      created_at: ruleMemory.createdAt,
+                      created_week_start: ruleMemory.createdWeekStart,
+                      resurfaced_week_start: ruleMemory.resurfacedWeekStart,
+                    },
+                    { onConflict: "session_id" },
+                  ),
+              ]
+            : []),
+        ]);
+        const errorResult = results.find((result) => result.error);
+
+        if (!errorResult) {
+          const syncedState: PersistedState = {
+            ...nextState,
+            revision: nextRevision,
+          };
+          hasLocalEditsRef.current = false;
+          skipNextPersistRef.current = true;
+          getBrowserStorage()?.setItem(
+            getStorageKey(sessionCode),
+            JSON.stringify(syncedState),
+          );
+          setRevision(nextRevision);
           setRemoteStateStatus("connected");
           return;
         }
 
-        if (error.code === "PGRST205") {
+        if (errorResult.error?.code === "PGRST205") {
           setRemoteStateStatus("missing-table");
           return;
         }
 
         setRemoteStateStatus("error");
-      });
+      })();
+    }, REMOTE_SAVE_DEBOUNCE_MS);
+
+    return () => {
+      if (remoteSaveTimerRef.current) {
+        window.clearTimeout(remoteSaveTimerRef.current);
+        remoteSaveTimerRef.current = null;
+      }
+    };
   }, [
-    activeFilter,
-    activeTab,
-    checkinAnswers,
-    checkinIndex,
+    ambiguousSpend,
+    bufferUpdatedBy,
+    checkinStep,
+    currentUserName,
+    currentView,
     enableRemoteSync,
-    focusLocked,
+    goalName,
+    hasJoinedSession,
     hasSupabaseConfig,
     isHydrated,
     locale,
-    rules,
+    participantNames,
+    revision,
+    remoteTablesMissing,
+    ruleMemory,
+    sessionCode,
+    weekStart,
+    weeklyBuffer,
   ]);
 
-  const filteredTimeline =
-    activeFilter === "all"
-      ? timeline
-      : timeline.filter((item) => item.category === activeFilter);
-
-  const currentStep = checkinSteps[checkinIndex];
-  const completedCheckin = checkinAnswers.length === checkinSteps.length;
-
-  const selectAnswer = (choice: string) => {
-    const nextAnswers = [...checkinAnswers];
-    nextAnswers[checkinIndex] = choice;
-    setCheckinAnswers(nextAnswers);
-
-    if (checkinIndex < checkinSteps.length - 1) {
-      setCheckinIndex(checkinIndex + 1);
-      setActiveTab("checkin");
+  const handleStartCheckin = () => {
+    if (!hasJoinedSession) {
+      return;
     }
+
+    setCurrentView("checkin");
+    setCheckinStep(0);
   };
 
-  const toggleRule = (index: number) => {
-    setRules((currentRules) =>
-      currentRules.map((rule, ruleIndex) =>
-        ruleIndex === index ? { ...rule, enabled: !rule.enabled } : rule,
-      ),
+  const handleJoinCurrentSession = () => {
+    const normalized = currentUserName.trim();
+
+    if (!normalized) {
+      return;
+    }
+
+    hasLocalEditsRef.current = true;
+    setCurrentUserName(normalized);
+    setHasJoinedSession(true);
+    setParticipantNames((current) =>
+      current.includes(normalized) ? current : [...current, normalized],
     );
   };
 
-  const clearSavedState = () => {
+  const handleBufferContinue = () => {
+    hasLocalEditsRef.current = true;
+    setWeeklyBuffer(parseNumber(bufferInput));
+    setCheckinStep(1);
+  };
+
+  const chooseSpendSuggestion = (label: string, amount: number) => {
+    setSpendLabelInput(label);
+    setSpendAmountInput(String(amount));
+  };
+
+  const handleSpendContinue = () => {
+    const normalizedLabel = spendLabelInput.trim();
+    const normalizedAmount = parseNumber(spendAmountInput);
+
+    if (!normalizedLabel || normalizedAmount <= 0) {
+      return;
+    }
+
+    hasLocalEditsRef.current = true;
+    setAmbiguousSpend({
+      label: normalizedLabel,
+      amount: normalizedAmount,
+      author: currentUserName,
+      createdAt: new Date().toISOString(),
+    });
+    setCheckinStep(2);
+  };
+
+  const handleSaveRule = () => {
+    const normalizedRule = ruleDraft.trim();
+
+    if (!normalizedRule || !ambiguousSpend) {
+      return;
+    }
+
+    hasLocalEditsRef.current = true;
+    setRuleMemory({
+      text: normalizedRule,
+      sourceLabel: ambiguousSpend.label,
+      createdAt: new Date().toISOString(),
+      createdWeekStart: weekStart,
+      resurfacedWeekStart: null,
+    });
+    setCurrentView("home");
+    setCheckinStep(0);
+  };
+
+  const handleCreateNewSession = () => {
+    const nextSessionCode = createSessionCode();
     skipNextPersistRef.current = true;
-    getBrowserStorage()?.removeItem(STORAGE_KEY);
-    setLocale("ko");
-    setActiveTab("home");
-    setActiveFilter("all");
-    setCheckinIndex(0);
-    setCheckinAnswers([]);
-    setRules(initialRules);
-    setFocusLocked(false);
+    replaceUrlSessionCode(nextSessionCode);
+    setSessionCode(nextSessionCode);
+    setJoinCodeInput(nextSessionCode);
+  };
+
+  const handleOpenJoinCode = () => {
+    const normalized = normalizeSessionCode(joinCodeInput);
+
+    if (!normalized) {
+      return;
+    }
+
+    skipNextPersistRef.current = true;
+    replaceUrlSessionCode(normalized);
+    setSessionCode(normalized);
+    setJoinCodeInput(normalized);
+  };
+
+  const clearSavedState = () => {
+    if (!sessionCode) {
+      return;
+    }
+
+    const nextState = getDefaultState(sessionCode);
+
+    skipNextPersistRef.current = true;
+    hasLocalEditsRef.current = false;
+    getBrowserStorage()?.removeItem(getStorageKey(sessionCode));
+    setLocale(nextState.locale);
+    setCurrentView(nextState.currentView);
+    setCheckinStep(nextState.checkinStep);
+    setCurrentUserName(nextState.currentUserName);
+    setHasJoinedSession(nextState.hasJoinedSession);
+    setParticipantNames(nextState.participantNames);
+    setWeekStart(nextState.weekStart);
+    setRevision(nextState.revision);
+    setGoalName(nextState.goalName);
+    setWeeklyBuffer(nextState.weeklyBuffer);
+    setBufferUpdatedBy(nextState.bufferUpdatedBy);
+    setAmbiguousSpend(nextState.ambiguousSpend);
+    setRuleMemory(nextState.ruleMemory);
+    setBufferInput(String(nextState.weeklyBuffer));
+    setSpendLabelInput("");
+    setSpendAmountInput("");
+    setRuleDraft("");
     setLastSavedAt(null);
   };
 
-  const localizedSavedAt = lastSavedAt
-    ? new Date(lastSavedAt).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")
-    : null;
+  if (!sessionCode) {
+    return null;
+  }
 
   return (
     <main className="page-shell">
@@ -774,14 +1194,20 @@ export function HomeClient({
                   <button
                     className={`filter-pill ${locale === "ko" ? "filter-pill-active" : ""}`}
                     type="button"
-                    onClick={() => setLocale("ko")}
+                    onClick={() => {
+                      hasLocalEditsRef.current = true;
+                      setLocale("ko");
+                    }}
                   >
                     {copy.languageKo[locale]}
                   </button>
                   <button
                     className={`filter-pill ${locale === "en" ? "filter-pill-active" : ""}`}
                     type="button"
-                    onClick={() => setLocale("en")}
+                    onClick={() => {
+                      hasLocalEditsRef.current = true;
+                      setLocale("en");
+                    }}
                   >
                     {copy.languageEn[locale]}
                   </button>
@@ -794,16 +1220,12 @@ export function HomeClient({
                 {renderBadge(hasSupabaseConfig, locale)}
               </strong>
               <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
-                {copy.connectionHelp[locale]}
-              </p>
-            </article>
-            <article className="mini-panel">
-              <p className="section-label">{copy.weekSummary[locale]}</p>
-              <strong className="mt-2 block text-base">
-                {copy.oneAlertOneRitualOneNote[locale]}
-              </strong>
-              <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
-                {copy.enoughContext[locale]}
+                {remoteStateStatus === "local-only" && copy.remoteLocalOnly[locale]}
+                {remoteStateStatus === "syncing" && copy.remoteSyncing[locale]}
+                {remoteStateStatus === "connected" && copy.remoteConnected[locale]}
+                {remoteStateStatus === "missing-table" && copy.remoteMissingTable[locale]}
+                {remoteStateStatus === "error" && copy.remoteError[locale]}
+                {remoteStateStatus === "conflict" && copy.remoteConflict[locale]}
               </p>
             </article>
             <article className="mini-panel sm:col-span-2 md:col-span-1">
@@ -811,15 +1233,12 @@ export function HomeClient({
                 <div>
                   <p className="section-label">{copy.storage[locale]}</p>
                   <strong className="mt-2 block text-base">
-                    {copy.savedOnDevice[locale]}
-                  </strong>
-                  <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
                     {localizedSavedAt
                       ? locale === "ko"
-                        ? `마지막 저장 ${localizedSavedAt}.`
-                        : `Last saved ${localizedSavedAt}.`
+                        ? `마지막 저장 ${localizedSavedAt}`
+                        : `Last saved ${localizedSavedAt}`
                       : copy.noSavedState[locale]}
-                  </p>
+                  </strong>
                 </div>
                 <button
                   className="secondary-button !min-h-0 !flex-none !px-4 !py-2 text-sm"
@@ -829,430 +1248,406 @@ export function HomeClient({
                   {copy.resetLocal[locale]}
                 </button>
               </div>
-              <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
-                {remoteStateStatus === "local-only" && copy.remoteLocalOnly[locale]}
-                {remoteStateStatus === "syncing" && copy.remoteSyncing[locale]}
-                {remoteStateStatus === "connected" && copy.remoteConnected[locale]}
-                {remoteStateStatus === "missing-table" && copy.remoteMissingTable[locale]}
-                {remoteStateStatus === "error" && copy.remoteError[locale]}
-              </p>
             </article>
           </div>
         </header>
 
-        <section className="mb-5 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-          <article className="hero-panel">
-            <p className="mb-2 text-sm font-medium uppercase tracking-[0.18em] text-[var(--accent-ink)]">
-              {copy.weeklyBuffer[locale]}
+        <section className="mb-5 grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
+          <article className="soft-card">
+            <p className="section-label">{copy.session[locale]}</p>
+            <h2 className="mt-2 text-2xl font-semibold tracking-[-0.05em]">
+              {copy.sessionCode[locale]}: {sessionCode}
+            </h2>
+            <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
+              {copy.sessionHelp[locale]}
             </p>
-            <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-              <div>
-                <p className="text-5xl font-semibold tracking-[-0.08em] sm:text-6xl">
-                  ₩184,000
-                </p>
-                <p className="mt-3 max-w-[24rem] text-sm leading-6 text-[var(--muted-ink)]">
-                  {copy.bufferDescription[locale]}
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <span className="status-chip">{copy.seenByBoth[locale]}</span>
-                <span className="status-chip">{copy.jejuInSixWeeks[locale]}</span>
-                <span className="status-chip">
-                  {focusLocked ? copy.focusLocked[locale] : copy.focusOpen[locale]}
-                </span>
-                {remoteStateStatus === "connected" && (
-                  <span className="status-chip">{copy.remoteSyncReady[locale]}</span>
-                )}
-              </div>
-            </div>
 
-            <div className="rounded-[1.4rem] bg-white/70 p-4">
-              <div className="mb-2 flex items-center justify-between gap-3 text-sm">
-                <span className="font-medium text-[var(--muted-ink)]">
-                  {copy.jejuTripFund[locale]}
-                </span>
-                <span className="font-semibold">₩1.24M / ₩2.00M</span>
+            <div className="mt-5 grid gap-4">
+              <label className="grid gap-2">
+                <span className="section-label">{copy.yourName[locale]}</span>
+                <input
+                  className="min-h-11 rounded-[1rem] border border-[var(--line)] bg-white px-4 py-3 text-base"
+                  value={currentUserName}
+                  onChange={(event) => setCurrentUserName(event.target.value)}
+                />
+              </label>
+
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={handleJoinCurrentSession}
+                >
+                  {copy.joinCurrentSession[locale]}
+                </button>
+                <div className="rounded-[1rem] border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--muted-ink)]">
+                  <p className="section-label">{copy.youJoined[locale]}</p>
+                  <p className="mt-2">
+                    {hasJoinedSession
+                      ? `${copy.joinedAs[locale]} ${currentUserName}`
+                      : copy.notJoinedYet[locale]}
+                  </p>
+                </div>
               </div>
-              <div className="h-3 overflow-hidden rounded-full bg-[var(--line)]">
-                <div className="h-full w-[62%] rounded-full bg-[var(--accent)]" />
+
+              <label className="grid gap-2">
+                <span className="section-label">{copy.shareLink[locale]}</span>
+                <input
+                  readOnly
+                  className="min-h-11 rounded-[1rem] border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--muted-ink)]"
+                  value={shareUrl}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="section-label">{copy.joinCode[locale]}</span>
+                <input
+                  className="min-h-11 rounded-[1rem] border border-[var(--line)] bg-white px-4 py-3 text-base uppercase"
+                  value={joinCodeInput}
+                  onChange={(event) => setJoinCodeInput(event.target.value.toUpperCase())}
+                />
+              </label>
+
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <button className="secondary-button" type="button" onClick={handleOpenJoinCode}>
+                  {copy.joinSession[locale]}
+                </button>
+                <button className="secondary-button" type="button" onClick={handleCreateNewSession}>
+                  {copy.newSession[locale]}
+                </button>
               </div>
-              <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
-                {copy.goalPace[locale]}
-              </p>
             </div>
           </article>
 
           <article className="action-panel">
-            <div className="mb-5 flex items-start justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium uppercase tracking-[0.18em] text-[var(--alert-ink)]">
-                  {copy.oneThingToCheck[locale]}
-                </p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-[-0.05em]">
-                  {copy.deliveryOffCourse[locale]}
-                </h2>
-              </div>
-              <span className="status-chip status-chip-alert">{copy.needsBoth[locale]}</span>
+            <p className="text-sm font-medium uppercase tracking-[0.18em] text-[var(--alert-ink)]">
+              {copy.participantStatus[locale]}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <span className={`status-chip ${partnerJoined ? "" : "status-chip-alert"}`}>
+                {participantSummary || currentUserName}
+              </span>
             </div>
-
-            <div className="grid gap-3 rounded-[1.4rem] bg-white p-4 text-sm">
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-[var(--muted-ink)]">{copy.amount[locale]}</span>
-                <strong>-₩28,000</strong>
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-[var(--muted-ink)]">{copy.ruleHit[locale]}</span>
-                <strong>{translate(initialRules[0].title, locale)}</strong>
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-[var(--muted-ink)]">{copy.goalDelay[locale]}</span>
-                <strong>+1 day</strong>
-              </div>
-            </div>
-
-            <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => {
-                  setFocusLocked(true);
-                  setActiveTab("checkin");
-                }}
-              >
-                {copy.checkTogether[locale]}
+            <p className="mt-4 text-sm leading-6 text-[var(--muted-ink)]">
+              {partnerJoined ? copy.partnerJoined[locale] : copy.waitingPartner[locale]}
+            </p>
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+              <button className="primary-button" type="button" onClick={handleStartCheckin}>
+                {copy.beginCheckin[locale]}
               </button>
               <button
                 className="secondary-button"
                 type="button"
-                onClick={() => setFocusLocked(false)}
+                onClick={() => setCurrentView("rules")}
               >
-                {copy.keepAsIs[locale]}
+                {copy.reviewRuleMemory[locale]}
               </button>
             </div>
+            {!hasJoinedSession && (
+              <p className="mt-4 text-sm leading-6 text-[var(--muted-ink)]">
+                {copy.joinBeforeCheckin[locale]}
+              </p>
+            )}
           </article>
         </section>
 
-        <section className="mb-5 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
-          <article className="soft-card">
-            <div className="mb-4 flex items-center justify-between gap-3">
+        {currentView === "home" && (
+          <section className="grid gap-4 lg:grid-cols-3">
+            <article className="hero-panel">
+              <p className="section-label">{copy.goal[locale]}</p>
+              <h2 className="mt-3 text-3xl font-semibold tracking-[-0.06em] sm:text-4xl">
+                {goalName}
+              </h2>
+              <div className="mt-6 rounded-[1.4rem] bg-white/70 p-4">
+                <p className="section-label">{copy.buffer[locale]}</p>
+                <p className="mt-3 text-4xl font-semibold tracking-[-0.06em] sm:text-5xl">
+                  {localizedBuffer}
+                </p>
+                <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
+                  {copy.bufferHelp[locale]}
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <span className="status-chip">
+                    {copy.currentWeekLabel[locale]}: {weekStart}
+                  </span>
+                  <span className="status-chip">
+                    {copy.updatedBy[locale]}: {bufferUpdatedBy}
+                  </span>
+                  <span className="status-chip">
+                    {copy.revisionLabel[locale]}: {revision}
+                  </span>
+                  {localizedSavedAt && (
+                    <span className="status-chip">
+                      {locale === "ko" ? `저장 ${localizedSavedAt}` : `Saved ${localizedSavedAt}`}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </article>
+
+            <article className="soft-card">
+              <p className="section-label">{copy.ambiguousSpend[locale]}</p>
+              {ambiguousSpend ? (
+                <>
+                  <h2 className="mt-3 text-2xl font-semibold tracking-[-0.04em]">
+                    {ambiguousSpend.label}
+                  </h2>
+                  <p className="mt-3 text-lg font-semibold">{localizedSpendAmount}</p>
+                  <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
+                    {locale === "ko"
+                      ? `${ambiguousSpend.author} 님이 기록함`
+                      : `Added by ${ambiguousSpend.author}`}
+                  </p>
+                </>
+              ) : (
+                <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
+                  {copy.noAmbiguousSpend[locale]}
+                </p>
+              )}
+            </article>
+
+            <article className="soft-card">
+              <p className="section-label">
+                {resurfacedThisWeek ? copy.resurfacedRule[locale] : copy.currentRule[locale]}
+              </p>
+              {ruleMemory && resurfacedThisWeek ? (
+                <>
+                  <h2 className="mt-3 text-2xl font-semibold tracking-[-0.04em]">
+                    {ruleMemory.text}
+                  </h2>
+                  <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
+                    {copy.sourceSpend[locale]}: {ruleMemory.sourceLabel}
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
+                    {copy.ruleCreatedWeek[locale]}: {ruleMemory.createdWeekStart}
+                  </p>
+                </>
+              ) : (
+                <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
+                  {ruleMemory ? copy.noRuleThisWeek[locale] : copy.noRule[locale]}
+                </p>
+              )}
+            </article>
+
+            <article className="soft-card lg:col-span-3">
+              <p className="section-label">{copy.checkinStatus[locale]}</p>
+              <h2 className="mt-3 text-2xl font-semibold tracking-[-0.04em]">
+                {completedCheckin
+                  ? copy.checkinComplete[locale]
+                  : copy.checkinIncomplete[locale]}
+              </h2>
+              <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
+                {copy.stickyHint[locale]}
+              </p>
+              <button
+                className="secondary-button mt-5"
+                type="button"
+                onClick={handleStartCheckin}
+              >
+                {completedCheckin ? copy.restartCheckin[locale] : copy.beginCheckin[locale]}
+              </button>
+            </article>
+          </section>
+        )}
+
+        {currentView === "checkin" && (
+          <section className="soft-card">
+            <div className="mb-6 flex items-start justify-between gap-4">
               <div>
-                <p className="section-label">{copy.workspace[locale]}</p>
-                <h2 className="mt-1 text-2xl font-semibold tracking-[-0.04em]">
-                  {copy.workspaceTitle[locale]}
+                <p className="section-label">{copy.checkinProgress[locale]}</p>
+                <h2 className="mt-2 text-3xl font-semibold tracking-[-0.05em]">
+                  {prompts[checkinStep]?.step[locale]}
+                </h2>
+                <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
+                  {prompts[checkinStep]?.helper[locale]}
+                </p>
+              </div>
+              <button
+                className="secondary-button !min-h-0 !flex-none !px-4 !py-2 text-sm"
+                type="button"
+                onClick={() => setCurrentView("home")}
+              >
+                {copy.backHome[locale]}
+              </button>
+            </div>
+
+            <div className="mb-6 h-2 overflow-hidden rounded-full bg-[var(--line)]">
+              <div
+                className="h-full rounded-full bg-[var(--accent)] transition-all"
+                style={{ width: `${((checkinStep + 1) / prompts.length) * 100}%` }}
+              />
+            </div>
+
+            <h3 className="text-2xl font-semibold tracking-[-0.04em]">
+              {prompts[checkinStep]?.title[locale]}
+            </h3>
+
+            {checkinStep === 0 && (
+              <div className="mt-6 grid gap-4">
+                <label className="grid gap-2">
+                  <span className="section-label">{copy.bufferLabel[locale]}</span>
+                  <input
+                    className="min-h-11 rounded-[1rem] border border-[var(--line)] bg-white px-4 py-3 text-base"
+                    inputMode="numeric"
+                    value={bufferInput}
+                    onChange={(event) => setBufferInput(event.target.value)}
+                  />
+                </label>
+                <label className="grid gap-2">
+                  <span className="section-label">{copy.updatedByLabel[locale]}</span>
+                  <input
+                    className="min-h-11 rounded-[1rem] border border-[var(--line)] bg-white px-4 py-3 text-base"
+                    value={bufferUpdatedBy}
+                    onChange={(event) => setBufferUpdatedBy(event.target.value)}
+                  />
+                </label>
+              </div>
+            )}
+
+            {checkinStep === 1 && (
+              <div className="mt-6 grid gap-6">
+                <div>
+                  <p className="section-label">{copy.chooseSuggestion[locale]}</p>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                    {spendSuggestions.map((suggestion) => (
+                      <button
+                        key={suggestion.ko}
+                        className="choice-card"
+                        type="button"
+                        onClick={() => chooseSpendSuggestion(suggestion[locale], suggestion.amount)}
+                      >
+                        <span className="block">{suggestion[locale]}</span>
+                        <span className="mt-2 block text-sm text-[var(--muted-ink)]">
+                          {formatCurrency(suggestion.amount, locale)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <label className="grid gap-2">
+                  <span className="section-label">{copy.customSpendLabel[locale]}</span>
+                  <input
+                    className="min-h-11 rounded-[1rem] border border-[var(--line)] bg-white px-4 py-3 text-base"
+                    value={spendLabelInput}
+                    onChange={(event) => setSpendLabelInput(event.target.value)}
+                  />
+                </label>
+                <label className="grid gap-2">
+                  <span className="section-label">{copy.amountLabel[locale]}</span>
+                  <input
+                    className="min-h-11 rounded-[1rem] border border-[var(--line)] bg-white px-4 py-3 text-base"
+                    inputMode="numeric"
+                    value={spendAmountInput}
+                    onChange={(event) => setSpendAmountInput(event.target.value)}
+                  />
+                </label>
+              </div>
+            )}
+
+            {checkinStep === 2 && (
+              <div className="mt-6 grid gap-6">
+                <div>
+                  <p className="section-label">{copy.ruleStarter[locale]}</p>
+                  <div className="mt-3 grid gap-3">
+                    {ruleStarters.map((starter) => (
+                      <button
+                        key={starter.ko}
+                        className="choice-card"
+                        type="button"
+                        onClick={() => setRuleDraft(starter[locale])}
+                      >
+                        {starter[locale]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <label className="grid gap-2">
+                  <span className="section-label">{copy.ruleTextarea[locale]}</span>
+                  <textarea
+                    className="min-h-28 rounded-[1rem] border border-[var(--line)] bg-white px-4 py-3 text-base"
+                    value={ruleDraft}
+                    onChange={(event) => setRuleDraft(event.target.value)}
+                  />
+                </label>
+              </div>
+            )}
+
+            <div className="sticky bottom-4 mt-8 flex flex-col gap-3 rounded-[1.4rem] border border-[var(--line)] bg-[rgba(246,240,231,0.92)] p-3 backdrop-blur sm:flex-row">
+              {checkinStep > 0 && (
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => setCheckinStep(checkinStep - 1)}
+                >
+                  {copy.back[locale]}
+                </button>
+              )}
+              {checkinStep === 0 && (
+                <button className="primary-button" type="button" onClick={handleBufferContinue}>
+                  {copy.continue[locale]}
+                </button>
+              )}
+              {checkinStep === 1 && (
+                <button className="primary-button" type="button" onClick={handleSpendContinue}>
+                  {copy.continue[locale]}
+                </button>
+              )}
+              {checkinStep === 2 && (
+                <button className="primary-button" type="button" onClick={handleSaveRule}>
+                  {copy.saveRule[locale]}
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+
+        {currentView === "rules" && (
+          <section className="soft-card">
+            <div className="mb-6 flex items-start justify-between gap-4">
+              <div>
+                <p className="section-label">{copy.savedRuleMemory[locale]}</p>
+                <h2 className="mt-2 text-3xl font-semibold tracking-[-0.05em]">
+                  {copy.currentRule[locale]}
                 </h2>
               </div>
               <button
                 className="secondary-button !min-h-0 !flex-none !px-4 !py-2 text-sm"
                 type="button"
-                onClick={() => setActiveTab("timeline")}
+                onClick={() => setCurrentView("home")}
               >
-                {copy.openTimeline[locale]}
+                {copy.backHome[locale]}
               </button>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-3">
-              <article className="mini-panel">
-                <p className="section-label">{copy.sharedTimeline[locale]}</p>
-                <h3 className="mt-2 text-lg font-semibold">
-                  {translate(timeline[2].amount, locale)}
+            {ruleMemory ? (
+              <article className="rule-card">
+                <h3 className="text-2xl font-semibold tracking-[-0.04em]">
+                  {ruleMemory.text}
                 </h3>
-                <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
-                  {copy.sharedStateDesc[locale]}
+                <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
+                  {copy.sourceSpend[locale]}: {ruleMemory.sourceLabel}
                 </p>
-              </article>
-              <article className="mini-panel">
-                <p className="section-label">{copy.weeklyCheckin[locale]}</p>
-                <h3 className="mt-2 text-lg font-semibold">{copy.tomorrowNine[locale]}</h3>
                 <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
-                  {copy.noExtraAdmin[locale]}
+                  {locale === "ko"
+                    ? `저장 시각 ${formatDate(ruleMemory.createdAt, locale)}`
+                    : `Saved ${formatDate(ruleMemory.createdAt, locale)}`}
                 </p>
-              </article>
-              <article className="mini-panel">
-                <p className="section-label">{copy.ruleCoverage[locale]}</p>
-                <h3 className="mt-2 text-lg font-semibold">
-                  {rules.filter((rule) => rule.enabled).length} {copy.activeGuardrails[locale]}
-                </h3>
-                <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
-                  {copy.lightStructure[locale]}
-                </p>
-              </article>
-            </div>
-          </article>
-
-          <article className="soft-card">
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <div>
-                <p className="section-label">{copy.quickJump[locale]}</p>
-                <h2 className="mt-1 text-2xl font-semibold tracking-[-0.04em]">
-                  {copy.plannedFlow[locale]}
-                </h2>
-              </div>
-            </div>
-            <div className="grid gap-3">
-              {(Object.keys(tabs) as TabId[]).map((tab) => (
-                <button
-                  key={tab}
-                  className={`tab-card ${activeTab === tab ? "tab-card-active" : ""}`}
-                  type="button"
-                  onClick={() => setActiveTab(tab)}
-                >
-                  <span className="text-left">
-                    <span className="block text-sm font-semibold">{tabs[tab][locale]}</span>
-                    <span className="mt-1 block text-sm text-[var(--muted-ink)]">
-                      {copy.tabDescriptions[tab][locale]}
-                    </span>
-                  </span>
-                  <span className="status-chip">
-                    {activeTab === tab ? copy.open[locale] : copy.view[locale]}
-                  </span>
+                <button className="secondary-button mt-5" type="button" onClick={handleStartCheckin}>
+                  {copy.reopenCheckin[locale]}
                 </button>
-              ))}
-            </div>
-          </article>
-        </section>
-
-        <section className="mb-6 flex-1">
-          {activeTab === "home" && (
-            <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-              <article className="soft-card">
-                <div className="mb-3">
-                  <p className="section-label">{copy.sharedTimeline[locale]}</p>
-                  <h2 className="mt-1 text-xl font-semibold tracking-[-0.03em]">
-                    {copy.momentsThatMatter[locale]}
-                  </h2>
-                </div>
-                <div className="grid gap-3">
-                  {timeline.slice(0, 3).map((item) => (
-                    <article key={item.title.en} className="timeline-card">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <h3 className="text-base font-semibold">
-                            {translate(item.title, locale)}
-                          </h3>
-                          <p className="mt-1 text-sm text-[var(--muted-ink)]">
-                            {translate(item.impact, locale)}
-                          </p>
-                        </div>
-                        <strong className="text-sm">{translate(item.amount, locale)}</strong>
-                      </div>
-                      <p className="mt-3 text-sm font-medium text-[var(--muted-ink)]">
-                        {translate(item.state, locale)}
-                      </p>
-                    </article>
-                  ))}
-                </div>
               </article>
-              <article className="soft-card">
-                <p className="section-label">{copy.currentPosture[locale]}</p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-[-0.04em]">
-                  {copy.planSmallOnPurpose[locale]}
-                </h2>
-                <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
-                  {copy.postureDescription[locale]}
+            ) : (
+              <article className="rule-card">
+                <p className="text-sm leading-6 text-[var(--muted-ink)]">
+                  {copy.noRuleHistory[locale]}
                 </p>
+                <button className="primary-button mt-5" type="button" onClick={handleStartCheckin}>
+                  {copy.beginCheckin[locale]}
+                </button>
               </article>
-            </div>
-          )}
-
-          {activeTab === "timeline" && (
-            <div className="soft-card">
-              <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <p className="section-label">{copy.sharedTimeline[locale]}</p>
-                  <h2 className="mt-1 text-2xl font-semibold tracking-[-0.04em]">
-                    {copy.timelineTitle[locale]}
-                  </h2>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {filters.map((filter) => (
-                    <button
-                      key={filter.id}
-                      className={`filter-pill ${
-                        activeFilter === filter.id ? "filter-pill-active" : ""
-                      }`}
-                      type="button"
-                      onClick={() => setActiveFilter(filter.id)}
-                    >
-                      {filter.label[locale]}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="grid gap-3">
-                {filteredTimeline.map((item) => (
-                  <article key={`${item.category}-${item.title.en}`} className="timeline-card">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="section-label">
-                          {filters.find((filter) => filter.id === item.category)?.label[locale]}
-                        </p>
-                        <h3 className="mt-2 text-lg font-semibold">
-                          {translate(item.title, locale)}
-                        </h3>
-                        <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
-                          {translate(item.impact, locale)}
-                        </p>
-                      </div>
-                      <strong className="text-sm">{translate(item.amount, locale)}</strong>
-                    </div>
-                    <p className="mt-4 text-sm font-medium text-[var(--muted-ink)]">
-                      {translate(item.state, locale)}
-                    </p>
-                  </article>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {activeTab === "checkin" && (
-            <div className="grid gap-4 lg:grid-cols-[1fr_0.9fr]">
-              <article className="soft-card">
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <div>
-                    <p className="section-label">{copy.weeklyCheckin[locale]}</p>
-                    <h2 className="mt-1 text-2xl font-semibold tracking-[-0.04em]">
-                      {copy.checkinTitle[locale]}
-                    </h2>
-                  </div>
-                  <span className="status-chip">
-                    {Math.min(checkinAnswers.length + 1, checkinSteps.length)} /{" "}
-                    {checkinSteps.length}
-                  </span>
-                </div>
-
-                <div className="mb-5 h-2 overflow-hidden rounded-full bg-[var(--line)]">
-                  <div
-                    className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300"
-                    style={{
-                      width: `${(checkinAnswers.length / checkinSteps.length) * 100}%`,
-                    }}
-                  />
-                </div>
-
-                {!completedCheckin ? (
-                  <>
-                    <p className="section-label">{translate(currentStep.label, locale)}</p>
-                    <h3 className="mt-2 text-xl font-semibold">
-                      {translate(currentStep.prompt, locale)}
-                    </h3>
-                    <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
-                      {translate(currentStep.helper, locale)}
-                    </p>
-                    <div className="mt-5 grid gap-3">
-                      {currentStep.choices.map((choice) => (
-                        <button
-                          key={choice.en}
-                          className="choice-card"
-                          type="button"
-                          onClick={() => selectAnswer(choice.en)}
-                        >
-                          {translate(choice, locale)}
-                        </button>
-                      ))}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <p className="section-label">{copy.completed[locale]}</p>
-                    <h3 className="mt-2 text-xl font-semibold">
-                      {copy.concretePlan[locale]}
-                    </h3>
-                    <div className="mt-5 grid gap-3">
-                      {checkinSteps.map((step, index) => (
-                        <article key={step.label.en} className="timeline-card">
-                          <p className="section-label">{translate(step.label, locale)}</p>
-                          <h4 className="mt-2 text-base font-semibold">
-                            {translate(step.prompt, locale)}
-                          </h4>
-                          <p className="mt-3 text-sm text-[var(--muted-ink)]">
-                            {locale === "ko"
-                              ? step.choices.find((choice) => choice.en === checkinAnswers[index])?.ko
-                              : checkinAnswers[index]}
-                          </p>
-                        </article>
-                      ))}
-                    </div>
-                    <button
-                      className="primary-button mt-5"
-                      type="button"
-                      onClick={() => {
-                        setCheckinAnswers([]);
-                        setCheckinIndex(0);
-                      }}
-                    >
-                      {copy.runAgain[locale]}
-                    </button>
-                  </>
-                )}
-              </article>
-
-              <article className="soft-card">
-                <p className="section-label">{copy.whyThisWorks[locale]}</p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-[-0.04em]">
-                  {copy.ritualRepeats[locale]}
-                </h2>
-                <p className="mt-3 text-sm leading-6 text-[var(--muted-ink)]">
-                  {copy.ritualDescription[locale]}
-                </p>
-              </article>
-            </div>
-          )}
-
-          {activeTab === "rules" && (
-            <div className="soft-card">
-              <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <p className="section-label">{copy.rulesTitle[locale]}</p>
-                  <h2 className="mt-1 text-2xl font-semibold tracking-[-0.04em]">
-                    {copy.rulesTitle[locale]}
-                  </h2>
-                </div>
-                <span className="status-chip">
-                  {rules.filter((rule) => rule.enabled).length} {copy.enabled[locale]}
-                </span>
-              </div>
-
-              <div className="grid gap-3">
-                {rules.map((rule, index) => (
-                  <article key={rule.title.en} className="rule-card">
-                    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <p className="text-lg font-semibold">{translate(rule.title, locale)}</p>
-                        <p className="mt-2 text-sm leading-6 text-[var(--muted-ink)]">
-                          {translate(rule.description, locale)}
-                        </p>
-                        <p className="mt-3 text-sm font-medium text-[var(--accent-ink)]">
-                          {translate(rule.impact, locale)}
-                        </p>
-                      </div>
-                      <button
-                        aria-pressed={rule.enabled}
-                        className={`toggle-button ${rule.enabled ? "toggle-button-on" : ""}`}
-                        type="button"
-                        onClick={() => toggleRule(index)}
-                      >
-                        <span className="toggle-thumb" />
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </div>
-          )}
-        </section>
-
-        <nav className="bottom-nav fixed inset-x-0 bottom-0 mx-auto flex w-full max-w-5xl items-center justify-around border-t border-[var(--line)] bg-[var(--paper)] px-4 py-3">
-          {(Object.keys(tabs) as TabId[]).map((tab) => (
-            <button
-              key={tab}
-              className={`nav-item ${activeTab === tab ? "nav-item-active" : ""}`}
-              type="button"
-              onClick={() => setActiveTab(tab)}
-            >
-              {tabs[tab][locale]}
-            </button>
-          ))}
-        </nav>
+            )}
+          </section>
+        )}
       </div>
     </main>
   );
